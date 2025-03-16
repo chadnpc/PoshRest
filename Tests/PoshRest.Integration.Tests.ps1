@@ -3,7 +3,7 @@
     BeforeAll {
       $tempFile = New-TemporaryFile
       "TestContent" | Out-File -FilePath $tempFile.FullName -Encoding utf8
-      $mockClient = [PoshRest]::new("https://api.example.com") | EnableCache
+      $mockClient = [PoshRest]::new("https://api.restful-api.dev") | EnableCache
       $mockClient.SetAuthentication("Bearer", "test-token")
       $mockClient.AddDefaultHeader("X-Custom-Header", "value")
       $mockClient.RetryPolicy.MaxRetries = 1
@@ -29,7 +29,7 @@
 
   Context "Error Handling" {
     It "Handles invalid URL segments" {
-      $client = [PoshRest]::new("https://api.example.com")
+      $client = [PoshRest]::new("https://api.restful-api.dev")
       $request = [PoshRestRequest]::new("users/{id}", [HttpMethod]::Get)
       { $client.BuildUri($request) } | Should -Throw "Missing URL segment 'id'"
     }
@@ -37,7 +37,7 @@
 
   Context "Authentication" {
     It "Applies custom authenticators" {
-      $client = [PoshRest]::new("https://api.example.com")
+      $client = [PoshRest]::new("https://api.restful-api.dev")
       $client.SetAuthenticator({
           param($req)
           $req.RequestMessage.Headers.Add("X-Dynamic", "value")
