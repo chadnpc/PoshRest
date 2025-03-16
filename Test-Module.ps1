@@ -1,10 +1,10 @@
 ﻿
 #!/usr/bin/env pwsh
 # .SYNOPSIS
-#   PoshRest testScript v0.1.0
+#   PoshRest testScript v0.1.1
 # .EXAMPLE
-#   ./Test-Module.ps1 -version 0.1.0
-#   Will test the module in ./BuildOutput/PoshRest/0.1.0/
+#   ./Test-Module.ps1 -version 0.1.1
+#   Will test the module in ./BuildOutput/PoshRest/0.1.1/
 # .EXAMPLE
 #   ./Test-Module.ps1
 #   Will test the latest  module version in ./BuildOutput/PoshRest/
