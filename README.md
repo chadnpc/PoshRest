@@ -27,7 +27,7 @@ Install-Module PoshRest -Scope CurrentUser
 Import-Module PoshRest
 
 # Create client with base URL
-$client = [PoshRest]::new("https://api.example.com/v1")
+$client = [PoshRest]::new("https://api.restful-api.dev")
 
 # Configure defaults
 $client.AddDefaultHeader("X-API-Key", "your-api-key").SetAuthentication("Bearer", "your-token").ConfigureRetry(5, [TimeSpan]::FromSeconds(2)).EnableCache()
@@ -54,7 +54,7 @@ if ($response.IsSuccessful) {
 ### 1. Chainable Configuration
 
   ```powershell
-  $client = [PoshRest]::new("https://api.example.com")
+  $client = [PoshRest]::new("https://api.restful-api.dev")
       .AddDefaultHeader("User-Agent", "MyApp/1.0")
       .AddDefaultParameter("api-version", "2.0", [ParameterType]::QueryString)
   ```
@@ -89,7 +89,7 @@ if ($response.IsSuccessful) {
 ### 4. Cookie Management
 
   ```powershell
-  $client.AddCookie("session", "abc123", "api.example.com", "/api")
+  $client.AddCookie("session", "abc123", "api.restful-api.dev", "/api")
   ```
 
 ### 5. File Upload
