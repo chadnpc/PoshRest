@@ -1,22 +1,45 @@
 ﻿#!/usr/bin/env pwsh
+using namespace System.IO
 using namespace System.Xml
 using namespace System.Net
 using namespace System.Text
+using namespace System.Xml.Linq
 using namespace System.Net.Http
 using namespace System.Text.Json
 using namespace System.Collections
+using namespace System.IO.Compression
+using namespace System.Threading.Tasks
 using namespace System.Net.Http.Headers
 using namespace System.Xml.Serialization
 using namespace System.Collections.Generic
+using namespace System.Runtime.CompilerServices
+
+#Requires -PSEdition Core
 
 #region    Classes
 enum ParameterType {
+  RequestContent
+  HttpContent
+  FormField
   QueryString
   Header
   UrlSegment
   Cookie
   Body
 }
+
+enum HttpRequestMethod {
+  GET 	  = 0
+  POST 	  = 1
+  PATCH   = 2
+  PUT     = 3
+  DELETE  = 4
+  HEAD    = 5
+  TRACE   = 6
+  CONNECT = 7
+  OPTIONS = 8
+} # Read more details @ https://restful-api.dev/rest-fundamentals#rest
+
 class PoshRestRetryPolicy {
   [int]$MaxRetries = 3
   [TimeSpan]$Delay = [TimeSpan]::FromSeconds(1)
@@ -47,14 +70,106 @@ class PoshRestResponse {
       $this.Headers[$header.Key] = $header.Value
     }
   }
+
+  [object] GetJsonObject() {
+    if ([string]::IsNullOrWhiteSpace($this.Content)) { return $null }
+    return $this.Content | ConvertFrom-Json
+  }
+
+  [object] GetJsonObject([Type]$type) {
+    if ([string]::IsNullOrWhiteSpace($this.Content)) { return $null }
+    $jsonObj = $this.Content | ConvertFrom-Json
+    return $jsonObj -as $type
+  }
+
+  [object] GetXmlObject() {
+    if ([string]::IsNullOrWhiteSpace($this.Content)) { return $null }
+    $xmlDoc = [System.Xml.XmlDocument]::new()
+    $xmlDoc.LoadXml($this.Content)
+    return $xmlDoc
+  }
+
+  [object] GetXmlObject([Type]$type) {
+    if ([string]::IsNullOrWhiteSpace($this.Content)) { return $null }
+    $serializer = [XmlSerializer]::new($type)
+    $reader = [System.IO.StringReader]::new($this.Content)
+    $result = $serializer.Deserialize($reader)
+    $reader.Close()
+    return $result
+  }
+
+  [XElement] GetXElement() {
+    if ([string]::IsNullOrWhiteSpace($this.Content)) { return $null }
+    return [XElement]::Parse($this.Content)
+  }
 }
+
+class PoshRestUtils {
+  static [string] ReadContentAsStringGzip([HttpResponseMessage]$response) {
+    # Check if response is compressed
+    if ($response.Content.Headers.ContentEncoding -contains "gzip") {
+      $stream = $response.Content.ReadAsStreamAsync().Result
+      $decompressedStream = [GZipStream]::new($stream, [CompressionMode]::Decompress)
+      $reader = [StreamReader]::new($decompressedStream)
+      return $reader.ReadToEnd()
+    }
+    return $response.Content.ReadAsStringAsync().Result
+  }
+
+  static [Stream] ReadContentAsStreamGzip([HttpResponseMessage]$response) {
+    # Check if response is compressed
+    if ($response.Content.Headers.ContentEncoding -contains "gzip") {
+      $stream = $response.Content.ReadAsStreamAsync().Result
+      return [GZipStream]::new($stream, [CompressionMode]::Decompress)
+    }
+    return $response.Content.ReadAsStreamAsync().Result
+  }
+
+  static [void] ApplyAcceptEncodingGzip([HttpRequestMessage]$request) {
+    $encodingMethod = "gzip"
+    $found = $false
+
+    foreach ($encoding in $request.Headers.AcceptEncoding) {
+      if ($encodingMethod -eq $encoding.Value) {
+        $found = $true
+        break
+      }
+    }
+
+    if (!$found) {
+      $request.Headers.AcceptEncoding.Add([StringWithQualityHeaderValue]::new($encodingMethod))
+    }
+  }
+
+  static [string] GetJsonString([object]$obj) {
+    return ConvertTo-Json -InputObject $obj -Depth 100 -Compress
+  }
+
+  static [string] GetXmlString([object]$obj) {
+    $serializer = [XmlSerializer]::new($obj.GetType())
+    $stringWriter = [StringWriter]::new()
+    $xmlWriter = [XmlWriter]::Create($stringWriter)
+    $serializer.Serialize($xmlWriter, $obj)
+    $xmlWriter.Close()
+    return $stringWriter.ToString()
+  }
+}
+
 class PoshRestRequest {
-  [HttpRequestMessage]$RequestMessage
-  [string]$Resource
-  [Dictionary[string, PoshRestParameter]]$Parameters = @{}
-  [object]$Body
-  [Dictionary[string, string]]$Headers = @{}
-  [Dictionary[string, string]]$Files = @{}
+  [ValidateNotNull()][object]$Body
+  [ValidateNotNull()][string]$Resource
+  [ValidateNotNull()][HttpRequestMessage]$RequestMessage
+  [ValidateNotNull()][Dictionary[string, string]]$Files = @{}
+  [ValidateNotNull()][Dictionary[string, string]]$Headers = @{}
+  [ValidateNotNull()][Dictionary[string, PoshRestParameter]]$Parameters = @{}
+
+  PoshRestRequest([string]$resource, [string]$method) {
+    if ($method -notin [Enum]::GetNames[HttpRequestMethod]()) {
+      throw [System.ComponentModel.InvalidEnumArgumentException]::new("method", 0, [HttpRequestMethod])
+    }
+    $this.Resource = $resource
+    $this.RequestMessage = [HttpRequestMessage]::new($method, "")
+  }
 
   PoshRestRequest([string]$resource, [HttpMethod]$method) {
     $this.Resource = $resource
@@ -95,51 +210,80 @@ class PoshRestRequest {
   }
 }
 
+# Similar to RequestPathAttribute in the inspiration
+class RequestPath {
+  [string]$Path
+
+  RequestPath([string]$path) {
+    $this.Path = $path
+  }
+
+  static [string] GetRequestPath([object]$requestObject) {
+    $attribute = $requestObject.GetType().GetCustomAttributes([RequestPath], $true) | Select-Object -First 1
+    if ($attribute) {
+      return $attribute.Path
+    }
+    return [string]::Empty
+  }
+
+  static [string] GetRequestPath([Type]$requestType) {
+    $attribute = $requestType.GetCustomAttributes([RequestPath], $true) | Select-Object -First 1
+    if ($attribute) {
+      return $attribute.Path
+    }
+    return [string]::Empty
+  }
+}
+
 class PoshRest {
+  [string]$BaseUrl
   [HttpClient]$Client
   [HttpClientHandler]$Handler
-  [string]$BaseUrl
+  [AuthenticationHeaderValue]$Auth
   [Dictionary[string, object]]$DefaultParameters = @{}
   [Dictionary[string, string]]$DefaultHeaders = @{}
   [Dictionary[string, string]]$Files = @{}
-  [AuthenticationHeaderValue]$Auth
-  [string]$ContentType = "application/json"
-  [string]$UserAgent = "PoshRest/0.1.0"
+  [ValidateNotNullOrWhiteSpace()][string]$UserAgent
+  [ValidateNotNullOrWhiteSpace()][string]$ContentType
   [JsonSerializerOptions]$JsonOptions
   [XmlSerializerNamespaces]$XmlNamespaces
   [XmlWriterSettings]$XmlWriterSettings
   [Dictionary[string, PoshRestResponse]]$Cache = @{}
+  static [HttpResponseMessage[]]$session_resps = @()
   [PoshRestRetryPolicy]$RetryPolicy
+  [bool]$UseCompression = $false
 
+  PoshRest() {
+    $this.__init__()
+  }
   PoshRest([string]$baseUrl) {
     $this.BaseUrl = $baseUrl.TrimEnd('/')
-    $this.Handler = [HttpClientHandler]::new()
-    $this.Handler.CookieContainer = [CookieContainer]::new()
-    $this.Client = [HttpClient]::new($this.Handler)
-    $this.JsonOptions = [JsonSerializerOptions]::new()
-    $this.JsonOptions.PropertyNamingPolicy = [JsonNamingPolicy]::CamelCase
-    $this.JsonOptions.WriteIndented = $true
-    $this.RetryPolicy = [PoshRestRetryPolicy]::new()
+    $this.__init__()
   }
-
   # Configuration Methods
   [PoshRest] AddDefaultHeader([string]$name, [string]$value) {
+    [ValidateNotNullOrWhiteSpace()][string]$name = $name
     $this.DefaultHeaders[$name] = $value
     return $this
   }
 
   [PoshRest] AddDefaultParameter([string]$name, [object]$value, [ParameterType]$type) {
+    [ValidateNotNullOrWhiteSpace()][string]$name = $name
     $this.DefaultParameters[$name] = @{ Value = $value; Type = $type }
     return $this
   }
-
-  [PoshRest] AddCookie([string]$name, [string]$value, [string]$domain = $null, [string]$path = $null) {
+  [PoshRest] AddCookie([string]$name, [string]$value) {
+    return $this.AddCookie($name, $value, $null, $null)
+  }
+  [PoshRest] AddCookie([string]$name, [string]$value, [string]$domain, [string]$path) {
+    [ValidateNotNullOrWhiteSpace()][string]$name = $name
     $cookie = New-Object System.Net.Cookie($name, $value, $path, $domain)
     $this.Handler.CookieContainer.Add($cookie)
     return $this
   }
 
   [PoshRest] SetAuthentication([string]$scheme, [string]$parameter) {
+    [ValidateNotNullOrWhiteSpace()][string]$scheme = $scheme
     $this.Auth = [AuthenticationHeaderValue]::new($scheme, $parameter)
     return $this
   }
@@ -159,7 +303,9 @@ class PoshRest {
     $this.XmlWriterSettings = $settings
     return $this
   }
-
+  [PoshRest] ConfigureRetry() {
+    return $this.ConfigureRetry(3, [TimeSpan]::FromSeconds(1))
+  }
   [PoshRest] ConfigureRetry([int]$maxRetries = 3, [TimeSpan]$delay = [TimeSpan]::FromSeconds(1)) {
     $this.RetryPolicy.MaxRetries = $maxRetries
     $this.RetryPolicy.Delay = $delay
@@ -170,23 +316,68 @@ class PoshRest {
     $this.Cache = [Dictionary[string, PoshRestResponse]]::new()
     return $this
   }
+  [PoshRest] EnableCompression() {
+    $this.UseCompression = $true
+    return $this
+  }
+  [PoshRestResponse] SendJsonRequest([HttpRequestMethod]$method, [Uri]$uri) {
+    return $this.SendJsonRequest([HttpMethod]::new("$method"), $uri, $null)
+  }
+  [PoshRestResponse] SendJsonRequest([HttpMethod]$method, [Uri]$uri) {
+    return $this.SendJsonRequest($method, $uri, $null)
+  }
+  [PoshRestResponse] SendJsonRequest([HttpRequestMethod]$method, [Uri]$uri, [object]$body) {
+    return $this.SendJsonRequest([HttpMethod]::new("$method"), $uri, $body)
+  }
+  [PoshRestResponse] SendJsonRequest([HttpMethod]$method, [Uri]$uri, [object]$body) {
+    $request = [PoshRestRequest]::new("", $method)
+    $request.RequestMessage.RequestUri = $uri
+    if ($null -ne $body -and @{} -ne $body) {
+      $request.AddJsonBody($body)
+    }
+    return $this.Execute($request)
+  }
+  [PoshRestResponse] SendXmlRequest([HttpMethod]$method, [Uri]$uri, [object]$body) {
+    $request = [PoshRestRequest]::new("", $method)
+    $request.RequestMessage.RequestUri = $uri
+    if ($body) {
+      $request.AddXmlBody($body)
+    }
+    return $this.Execute($request)
+  }
 
-  # Request Execution
+  # Methods for RequestPath
+  [PoshRestResponse] ExecuteWithRequestPath([object]$requestObject) {
+    $path = [RequestPath]::GetRequestPath($requestObject)
+    if ([string]::IsNullOrEmpty($path)) {
+      throw "Request object does not have a RequestPath attribute"
+    }
+
+    $request = [PoshRestRequest]::new($path, [HttpMethod]::Get)
+    if ($requestObject -is [IDictionary]) {
+      $request.AddJsonBody($requestObject)
+    } else {
+      $request.AddJsonBody([PSCustomObject]$requestObject)
+    }
+
+    return $this.Execute($request)
+  }
+
   [PoshRestResponse] Execute([PoshRestRequest]$request) {
-    return $this.ExecuteAsync($request).GetAwaiter().GetResult()
-  }
-
-  hidden [PoshRestResponse] ExecuteSync([PoshRestRequest]$request) {
-    return $this.ExecuteAsync($request).GetAwaiter().GetResult()
-  }
-
-  [PoshRestResponse] ExecuteAsync([PoshRestRequest]$request) {
     $retryCount = 0; $response = $null
 
     while ($true) {
       $preparedRequest = $this.PrepareRequest($request)
+
+      if ($this.UseCompression) {
+        [PoshRestUtils]::ApplyAcceptEncodingGzip($preparedRequest.RequestMessage)
+      }
+
       try {
-        $response = await $this.Client.SendAsync($preparedRequest.RequestMessage)
+        [Task[HttpResponseMessage]]$task = $this.Client.SendAsync($preparedRequest.RequestMessage)
+        $awaiter = [TaskAwaiter]$task.GetAwaiter()
+        $response = $awaiter.GetResult()
+        [PoshRest]::results += $response
       } catch {
         if ($retryCount -ge $this.RetryPolicy.MaxRetries) { throw }
         Start-Sleep -Milliseconds $this.RetryPolicy.Delay.TotalMilliseconds
@@ -205,8 +396,16 @@ class PoshRest {
         break
       }
     }
-
-    $responseResult = [PoshRestResponse]::new($response)
+    return $null
+    # Handle compressed response if needed
+    $responseResult = if ($this.UseCompression) {
+      $content = [PoshRestUtils]::ReadContentAsStringGzip($response)
+      $responseObj = [PoshRestResponse]::new($response)
+      $responseObj.Content = $content
+      $responseObj
+    } else {
+      [PoshRestResponse]::new($response)
+    }
 
     if ($this.Cache -and $request.RequestMessage.Method -eq [HttpMethod]::Get) {
       $cacheKey = "$($request.RequestMessage.RequestUri)::$($request.RequestMessage.Method)"
@@ -215,9 +414,9 @@ class PoshRest {
 
     return $responseResult
   }
+  # [Task[PoshRestResponse]] ExecuteAsync([PoshRestRequest]$request) {}
 
-  # Request Preparation
-  hidden [PoshRestRequest] PrepareRequest([PoshRestRequest]$request) {
+  [PoshRestRequest] PrepareRequest([PoshRestRequest]$request) {
     $uri = $this.BuildUri($request)
     $request.RequestMessage.RequestUri = $uri
 
@@ -231,7 +430,17 @@ class PoshRest {
 
     return $request
   }
-
+  hidden [void] __init__() {
+    $this.UserAgent = $this.GetType().Name
+    $this.ContentType = "application/json"
+    $this.Handler = [HttpClientHandler]::new()
+    $this.Handler.CookieContainer = [CookieContainer]::new()
+    $this.Client = [HttpClient]::new($this.Handler)
+    $this.JsonOptions = [JsonSerializerOptions]::new()
+    $this.JsonOptions.PropertyNamingPolicy = [JsonNamingPolicy]::CamelCase
+    $this.JsonOptions.WriteIndented = $true
+    $this.RetryPolicy = [PoshRestRetryPolicy]::new()
+  }
   hidden [Uri] BuildUri([PoshRestRequest]$request) {
     $resourcePath = $request.Resource
     foreach ($param in $this.DefaultParameters.Values + $request.Parameters.Values) {
@@ -260,11 +469,11 @@ class PoshRest {
 
   hidden [void] ApplyDefaultHeaders([PoshRestRequest]$request) {
     foreach ($header in $this.DefaultHeaders.GetEnumerator()) {
-      if (-not $request.Headers.ContainsKey($header.Key)) {
+      if (!$request.Headers.ContainsKey($header.Key)) {
         $request.RequestMessage.Headers.Add($header.Key, $header.Value)
       }
     }
-
+    if ([string]::IsNullOrWhiteSpace($this.UserAgent)) { $this.UserAgent = $this.GetType().Name }
     $request.RequestMessage.Headers.UserAgent.ParseAdd($this.UserAgent)
     $request.RequestMessage.Headers.Accept.Add([MediaTypeWithQualityHeaderValue]::new($this.ContentType))
   }
@@ -276,10 +485,10 @@ class PoshRest {
   }
 
   hidden [void] ApplyBody([PoshRestRequest]$request) {
-    if (-not $request.Body -and -not $request.Files.Count) { return }
+    if (!$request.Body -and !$request.Files.Count) { return }
 
     $content = switch ($true) {
-            ($request.Files.Count -gt 0) {
+      $($request.Files.Count -gt 0) {
         $formData = [MultipartFormDataContent]::new()
         if ($request.Body -is [IDictionary]) {
           foreach ($key in $request.Body.Keys) {
@@ -316,14 +525,15 @@ class PoshRest {
         }
       }
     }
-
     $request.RequestMessage.Content = $content
   }
 }
 #endregion Classes
+
 # Types that will be available to users when they import the module.
 $typestoExport = @(
-  [PoshRest], [PoshRestParameter], [PoshRestRequest], [PoshRestResponse], [PoshRestRetryPolicy], [ParameterType]
+  [PoshRest], [PoshRestParameter], [HttpRequestMethod], [PoshRestRequest],
+  [PoshRestResponse], [PoshRestRetryPolicy], [ParameterType], [PoshRestUtils], [RequestPath]
 )
 $TypeAcceleratorsClass = [PsObject].Assembly.GetType('System.Management.Automation.TypeAccelerators')
 foreach ($Type in $typestoExport) {
