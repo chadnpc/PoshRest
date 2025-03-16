@@ -4,7 +4,7 @@
     Specify a URI to a help page, this will show when Get-Help -Online is used.
   .EXAMPLE
     # Create client with dynamic auth
-    $client = Use-DynamicAuthHeader -Uri "https://api.example.com" -TokenGenerator ${function:Get-OAuthToken}
+    $client = Use-DynamicAuthHeader -Uri "https://api.restful-api.dev" -TokenGenerator ${function:Get-OAuthToken}
 
     # Make authenticated request
     $request = [PoshRestRequest]::new("users", [HttpMethod]::Get)
