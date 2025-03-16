@@ -26,7 +26,7 @@
 
   .EXAMPLE
     # Create client with caching
-    $client = [PoshRest]::new("https://api.example.com/v1") | EnableCache
+    $client = [PoshRest]::new("https://api.restful-api.dev") | EnableCache
 
     # First request (fetches from server)
     $result = Get-CachedResource -Client $client -Uri "/users" -QueryParameters @{page=1} -AsJson
@@ -45,11 +45,11 @@
     The function returns parsed JSON or raw content based on parameters
 
   .EXAMPLE
-    $client = [PoshRest]::new("https://api.example.com") | EnableCache
+    $client = [PoshRest]::new("https://api.restful-api.dev") | EnableCache
     Get-CachedResource -Client $client -Uri "/data" -QueryParameters @{page=2}
 
   .EXAMPLE
-    $client = [PoshRest]::new("https://api.example.com") | EnableCache
+    $client = [PoshRest]::new("https://api.restful-api.dev") | EnableCache
     Get-CachedResource -Client $client -Uri "/users" -Headers @{Authorization="Bearer $token"} -AsJson
   #>
   [CmdletBinding()]
